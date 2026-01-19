@@ -5,7 +5,7 @@ use getset::{CopyGetters, Getters, Setters};
 use uuid::Uuid;
 
 use crate::{
-    Logger, ProgressReporter,
+    logger::{Logger, ProgressReporter},
     task::{TaskStatus, Value},
 };
 

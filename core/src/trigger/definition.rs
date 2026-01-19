@@ -1,7 +1,7 @@
 use derive_builder::Builder;
 use getset::{Getters, Setters};
 
-use crate::workflow::{context::TriggerContext, result::TriggerResult, schema::TriggerSchema};
+use crate::trigger::{TriggerContext, TriggerResult, TriggerSchema};
 
 /// Definition of a kind of Trigger within the workflow system.
 /// This is independent of any specific instance of a Trigger.

@@ -1,17 +1,18 @@
 pub mod logger;
 pub mod task;
+pub mod trigger;
 pub mod workflow;
 
-pub use logger::{LogLevel, Logger, ProgressReporter};
+mod error;
+mod value;
+pub use error::{CoreError, Result};
+pub use value::Value;
 
 #[cfg(test)]
 pub mod test {
     use crate::{
-        task::{
-            DataType,
-            schema::{InputSpec, OutputSpec},
-        },
-        workflow::{TriggerDefinition, TriggerSchema, result::TriggerResult},
+        task::{DataType, InputSpec, OutputSpec},
+        trigger::{TriggerDefinition, TriggerResult, TriggerSchema},
     };
 
     #[test]
@@ -19,8 +20,10 @@ pub mod test {
         use uuid::Uuid;
 
         use crate::{
-            task::{InputBinding, Task, TaskDefinition, TaskResult, TaskSchema, Value},
-            workflow::{Trigger, Workflow},
+            Value,
+            task::{InputBinding, Task, TaskDefinition, TaskResult, TaskSchema},
+            trigger::Trigger,
+            workflow::Workflow,
         };
 
         let file_added_trigger = TriggerDefinition::builder()
@@ -90,8 +93,8 @@ pub mod test {
 
         // Create a workflow
         let mut wf = Workflow::builder()
-            .name("Image Processing Workflow".to_string())
-            .description(Some("Workflow to process and upload images".to_string()))
+            .name("Image Processing Workflow")
+            .description(Some("Workflow to process and upload images"))
             .build()
             .unwrap();
 
@@ -143,9 +146,9 @@ pub mod test {
             .unwrap();
 
         wf.add_trigger(new_file_trigger);
-        wf.add_task(resize);
-        wf.add_task(compress);
-        wf.add_task(upload);
-        wf.add_task(thumbnail);
+        wf.add_task(resize).unwrap();
+        wf.add_task(compress).unwrap();
+        wf.add_task(upload).unwrap();
+        wf.add_task(thumbnail).unwrap();
     }
 }

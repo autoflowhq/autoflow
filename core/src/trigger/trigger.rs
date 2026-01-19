@@ -4,7 +4,7 @@ use derive_builder::Builder;
 use getset::{CopyGetters, Getters, Setters};
 use uuid::Uuid;
 
-use crate::{task::Value, workflow::TriggerDefinition};
+use crate::{Value, trigger::TriggerDefinition};
 
 /// Represents a Trigger in the workflow
 #[derive(Getters, Setters, CopyGetters, Builder, Clone)]
