@@ -1,0 +1,32 @@
+use derive_builder::Builder;
+use getset::{Getters, Setters};
+
+use crate::workflow::{context::TriggerContext, result::TriggerResult, schema::TriggerSchema};
+
+/// Definition of a kind of Trigger within the workflow system.
+/// This is independent of any specific instance of a Trigger.
+/// A TriggerDefinition defines the name, schema, and the function
+/// that is called when the trigger is evaluated.
+#[derive(Builder, Getters, Setters)]
+#[builder(pattern = "owned")]
+pub struct TriggerDefinition<'a> {
+    /// Name of the trigger
+    #[getset(get = "pub")]
+    name: &'a str,
+
+    /// Schema defining inputs and outputs of the trigger
+    #[builder(default)]
+    #[getset(get = "pub")]
+    schema: TriggerSchema<'a>,
+
+    /// Function called when the trigger is evaluated
+    #[getset(get = "pub")]
+    triggered: fn(&TriggerContext<'a>) -> TriggerResult,
+}
+
+impl<'a> TriggerDefinition<'a> {
+    /// Creates a new builder for TriggerDefinition
+    pub fn builder() -> TriggerDefinitionBuilder<'a> {
+        TriggerDefinitionBuilder::default()
+    }
+}
