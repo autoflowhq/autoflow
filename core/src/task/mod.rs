@@ -1,6 +1,7 @@
 mod context;
 mod datatype;
 mod definition;
+mod error;
 mod result;
 mod schema;
 mod status;
@@ -9,6 +10,7 @@ mod task;
 pub use context::TaskContext;
 pub use datatype::DataType;
 pub use definition::TaskDefinition;
+pub use error::{Result, TaskError};
 pub use result::TaskResult;
 pub use schema::{InputSpec, OutputSpec, TaskSchema};
 pub use status::TaskStatus;

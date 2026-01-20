@@ -1,4 +1,5 @@
 pub mod logger;
+pub mod plugin;
 pub mod task;
 pub mod trigger;
 pub mod workflow;
@@ -11,6 +12,7 @@ pub use value::Value;
 #[cfg(test)]
 pub mod test {
     use crate::{
+        plugin::{Plugin, Registry},
         task::{DataType, InputSpec, OutputSpec},
         trigger::{TriggerDefinition, TriggerResult, TriggerSchema},
     };
@@ -91,6 +93,19 @@ pub mod test {
             .build()
             .unwrap();
 
+        let plugin = Plugin::builder()
+            .name("ImageProcessingPlugin")
+            .task(resize_image)
+            .task(compress_image)
+            .task(upload_file)
+            .task(generate_thumbnail)
+            .trigger(file_added_trigger)
+            .build()
+            .unwrap();
+
+        let mut registry = Registry::new();
+        registry.register_plugin(plugin);
+
         // Create a workflow
         let mut wf = Workflow::builder()
             .name("Image Processing Workflow")
@@ -102,7 +117,13 @@ pub mod test {
         let new_file_trigger = Trigger::builder()
             .id(Uuid::new_v4())
             .name("new_file")
-            .definition(&file_added_trigger)
+            .definition(
+                registry
+                    .get_plugin("ImageProcessingPlugin")
+                    .unwrap()
+                    .get_trigger("file_added")
+                    .unwrap(),
+            )
             .input(("path", Value::String("/Downloads")))
             .build()
             .unwrap();
@@ -110,7 +131,13 @@ pub mod test {
         // Add tasks through the workflow
         let resize = Task::builder()
             .name("resize_image")
-            .definition(&resize_image)
+            .definition(
+                registry
+                    .get_plugin("ImageProcessingPlugin")
+                    .unwrap()
+                    .get_task("resize_image")
+                    .unwrap(),
+            )
             .input((
                 "file",
                 InputBinding::trigger(new_file_trigger.id(), "file_path"),
@@ -123,7 +150,13 @@ pub mod test {
 
         let compress = Task::builder()
             .name("compress_image")
-            .definition(&compress_image)
+            .definition(
+                registry
+                    .get_plugin("ImageProcessingPlugin")
+                    .unwrap()
+                    .get_task("compress_image")
+                    .unwrap(),
+            )
             .input(("file", InputBinding::task(resize.id(), "resized_file")))
             .retry(2u32)
             .build()
@@ -131,7 +164,13 @@ pub mod test {
 
         let upload = Task::builder()
             .name("upload_file")
-            .definition(&upload_file)
+            .definition(
+                registry
+                    .get_plugin("ImageProcessingPlugin")
+                    .unwrap()
+                    .get_task("upload_file")
+                    .unwrap(),
+            )
             .input(("file", InputBinding::task(compress.id(), "compressed_file")))
             .input(("bucket", InputBinding::literal(Value::String("my-bucket"))))
             .build()
@@ -139,7 +178,13 @@ pub mod test {
 
         let thumbnail = Task::builder()
             .name("generate_thumbnail")
-            .definition(&generate_thumbnail)
+            .definition(
+                registry
+                    .get_plugin("ImageProcessingPlugin")
+                    .unwrap()
+                    .get_task("generate_thumbnail")
+                    .unwrap(),
+            )
             .input(("file", InputBinding::task(resize.id(), "resized_file")))
             .parallel(true)
             .build()

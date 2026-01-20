@@ -6,7 +6,7 @@ use getset::Getters;
 use crate::task::DataType;
 
 /// Schema defining the outputs of a Trigger in the workflow
-#[derive(Default, Getters, Builder)]
+#[derive(Default, Getters, Builder, Debug)]
 #[builder(pattern = "owned")]
 pub struct TriggerSchema<'a> {
     /// Output specifications for the trigger

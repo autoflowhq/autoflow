@@ -4,7 +4,7 @@ use derive_builder::Builder;
 use getset::{CopyGetters, Getters, Setters};
 use uuid::Uuid;
 
-use crate::task::{InputBinding, TaskDefinition, TaskStatus};
+use crate::task::{InputBinding, TaskDefinition, TaskError, TaskStatus};
 
 /// Represents an instance of a Task within a workflow
 #[derive(Getters, Setters, CopyGetters, Builder, Debug, Clone)]
@@ -99,17 +99,20 @@ impl<'a> Task<'a> {
 
 impl<'a> TaskBuilder<'a> {
     /// Validates the Task before building
-    fn validate(&self) -> Result<(), String> {
-        self.validate_schema()
+    fn validate(&self) -> Result<(), TaskBuilderError> {
+        self.validate_schema().map_err(|e| match e {
+            TaskError::MissingTaskDefinition => TaskBuilderError::UninitializedField("definition"),
+            _ => TaskBuilderError::ValidationError(e.to_string()),
+        })
     }
 
     /// Validates input bindings against the task definition schema
     /// In particular, checks that literal values match expected data types
     /// as defined in the TaskSchema.
-    fn validate_schema(&self) -> Result<(), String> {
+    fn validate_schema(&self) -> crate::task::Result<()> {
         let definition = self
             .definition
-            .ok_or_else(|| "Task definition is required".to_string())?;
+            .ok_or_else(|| TaskError::MissingTaskDefinition)?;
         let schema = definition.schema();
         if let Some(inputs) = &self.inputs {
             for (key, binding) in inputs {
@@ -121,13 +124,16 @@ impl<'a> TaskBuilder<'a> {
                         .map(|(_, spec)| spec.data_type());
                     if let Some(expected) = expected_type {
                         if value.get_type() != *expected {
-                            return Err(format!(
-                                "Input '{}' has incompatible type. Expected {:?}, got {:?}",
-                                key, expected, value
-                            ));
+                            return Err(TaskError::InputTypeMismatch {
+                                input: key.to_string(),
+                                expected: format!("{:?}", expected),
+                                found: format!("{:?}", value),
+                            });
                         }
                     } else {
-                        return Err(format!("Input '{}' not defined in schema", key));
+                        return Err(TaskError::InputNotInSchema {
+                            input: key.to_string(),
+                        });
                     }
                 }
             }

@@ -7,7 +7,7 @@ use crate::trigger::{TriggerContext, TriggerResult, TriggerSchema};
 /// This is independent of any specific instance of a Trigger.
 /// A TriggerDefinition defines the name, schema, and the function
 /// that is called when the trigger is evaluated.
-#[derive(Builder, Getters, Setters)]
+#[derive(Builder, Getters, Setters, Debug)]
 #[builder(pattern = "owned")]
 pub struct TriggerDefinition<'a> {
     /// Name of the trigger
