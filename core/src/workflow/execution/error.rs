@@ -1,4 +1,5 @@
 use thiserror::Error;
+use uuid::Uuid;
 
 use crate::workflow::DependencyRef;
 
@@ -16,6 +17,15 @@ pub enum ExecutionError {
 
     #[error("dependency {dependency:?} failed to produce outputs.")]
     FailedDependencyOutput { dependency: DependencyRef },
+
+    #[error("task with ID {id} not found")]
+    TaskNotFound { id: Uuid },
+
+    #[error("trigger with ID {id} not found")]
+    TriggerNotFound { id: Uuid },
+
+    #[error("failed to build task context")]
+    FailedToBuildTaskContext,
 }
 
 pub type Result<T> = std::result::Result<T, ExecutionError>;

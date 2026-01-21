@@ -8,8 +8,8 @@ use uuid::Uuid;
 use crate::{
     Value,
     plugin::Registry,
-    task::{InputBinding, TaskContext, TaskResult, TaskStatus},
-    trigger::{Trigger, TriggerContext, TriggerResult},
+    task::{InputBinding, Task, TaskContext, TaskResult, TaskStatus},
+    trigger::{Trigger, TriggerResult},
     workflow::{
         self, DependencyRef, Workflow, WorkflowExecutionContext,
         execution::{ExecutionError, ExecutionGraph},
@@ -104,96 +104,115 @@ impl<'a> WorkflowExecutor<'a> {
         }
     }
 
-    /// Executes the workflow
+    /// Executes the workflow starting from a given trigger
     pub fn execute_from_trigger(
         &mut self,
         trigger_id: Uuid,
         result: TriggerResult<'a>,
     ) -> workflow::Result<()> {
-        // Execution logic to be implemented
-
-        let trigger = self
-            .workflow
-            .triggers()
-            .get(&trigger_id)
-            .ok_or_else(|| panic!("Trigger with ID {} not found", trigger_id))
-            .unwrap();
-
-        let _trigger_context = TriggerContext::builder()
-            .trigger_name(trigger.name())
-            .build();
-
+        let trigger = self.get_trigger(trigger_id)?;
         let graph = self.build_execution_graph(trigger)?;
-        let sorted = graph.topological_sort()?;
+        let sorted_nodes = graph.topological_sort()?;
 
-        // Map to hold outputs for each DependencyRef::Task or DependencyRef::Trigger
-        let mut outputs_map: HashMap<DependencyRef, HashMap<&'a str, Value>> = HashMap::new();
-
-        // Insert the trigger's outputs using the correct DependencyRef::Trigger key
+        let mut outputs_map: HashMap<DependencyRef, HashMap<&'a str, Value<'a>>> = HashMap::new();
         outputs_map.insert(DependencyRef::Trigger(trigger_id), result.outputs().clone());
 
-        for dep in sorted {
-            println!("Executing dependency: {:?}", dep);
-            match dep {
-                DependencyRef::Trigger(_tid) => {}
-                DependencyRef::Task(task_id) => {
-                    let task = self
-                        .workflow
-                        .tasks()
-                        .get(&task_id)
-                        .ok_or_else(|| panic!("Task with ID {} not found", task_id))
-                        .unwrap();
-
-                    // Gather inputs from dependencies
-                    let mut input_values: HashMap<&'a str, Value> = HashMap::new();
-
-                    for (input_key, binding) in task.inputs() {
-                        let value = match binding {
-                            InputBinding::Literal(v) => v.clone(),
-
-                            InputBinding::Reference { ref_from, output } => {
-                                let dep_outputs = outputs_map.get(ref_from).ok_or_else(|| {
-                                    ExecutionError::FailedDependencyOutput {
-                                        dependency: *ref_from,
-                                    }
-                                })?;
-
-                                dep_outputs.get(output).cloned().ok_or_else(|| {
-                                    ExecutionError::MissingDependencyOutput {
-                                        dependency: *ref_from,
-                                        output: output.to_string(),
-                                    }
-                                })?
-                            }
-                        };
-
-                        input_values.insert(*input_key, value);
-                    }
-
-                    let task_context = TaskContext::builder()
-                        .task_id(task_id)
-                        .task_name(task.name())
-                        .task_definition(task.definition())
-                        .workflow_id(*self.workflow.id())
-                        .description(*task.description())
-                        .resolved_inputs(input_values)
-                        .build()
-                        .unwrap();
-                    let task_result = task.definition().execute(&task_context);
-                    let outputs = task_result.outputs();
-                    println!("Task Result: {:?}", task_result);
-
-                    self.task_results.insert(task_id, task_result.clone());
-
-                    // If the task failed to produce expected outputs, raise error
-                    outputs_map.insert(dep, outputs.clone());
-                }
-            }
+        for node in sorted_nodes {
+            self.execute_node(node, &mut outputs_map)?;
         }
 
         Ok(())
     }
 
+    /// Retrieves a trigger by ID
+    fn get_trigger(&self, trigger_id: Uuid) -> workflow::Result<&Trigger<'a>> {
+        self.workflow
+            .triggers()
+            .get(&trigger_id)
+            .ok_or_else(|| ExecutionError::TriggerNotFound { id: trigger_id }.into())
+    }
+
+    /// Executes a node in the execution graph
+    fn execute_node(
+        &mut self,
+        node: DependencyRef,
+        outputs_map: &mut HashMap<DependencyRef, HashMap<&'a str, Value<'a>>>,
+    ) -> workflow::Result<()> {
+        match node {
+            DependencyRef::Trigger(_) => Ok(()), // nothing to do
+            DependencyRef::Task(task_id) => self.execute_task(task_id, outputs_map),
+        }
+    }
+
+    /// Executes a task by its ID
+    fn execute_task(
+        &mut self,
+        task_id: Uuid,
+        outputs_map: &mut HashMap<DependencyRef, HashMap<&'a str, Value<'a>>>,
+    ) -> workflow::Result<()> {
+        let task = self
+            .workflow
+            .tasks()
+            .get(&task_id)
+            .ok_or_else(|| ExecutionError::TaskNotFound { id: task_id })?;
+
+        let input_values = self.resolve_task_inputs(task, outputs_map)?;
+        let task_context = self.build_task_context(task, input_values)?;
+
+        let result = task.definition().execute(&task_context);
+        outputs_map.insert(DependencyRef::Task(task_id), result.outputs().clone());
+        self.task_results.insert(task_id, result.clone());
+
+        Ok(())
+    }
+
+    /// Resolves the inputs for a task based on its input bindings
+    fn resolve_task_inputs(
+        &self,
+        task: &Task<'a>,
+        outputs_map: &HashMap<DependencyRef, HashMap<&'a str, Value<'a>>>,
+    ) -> workflow::Result<HashMap<&'a str, Value<'a>>> {
+        let mut input_values: HashMap<&'a str, Value<'a>> = HashMap::new();
+        for (key, binding) in task.inputs() {
+            let value = match binding {
+                InputBinding::Literal(v) => v.clone(),
+                InputBinding::Reference { ref_from, output } => {
+                    let dep_outputs = outputs_map.get(&ref_from).ok_or_else(|| {
+                        ExecutionError::FailedDependencyOutput {
+                            dependency: *ref_from,
+                        }
+                    })?;
+                    dep_outputs.get(output).cloned().ok_or_else(|| {
+                        ExecutionError::MissingDependencyOutput {
+                            dependency: *ref_from,
+                            output: output.to_string(),
+                        }
+                    })?
+                }
+            };
+            input_values.insert(*key, value);
+        }
+        Ok(input_values)
+    }
+
+    /// Builds the task context for a given task
+    fn build_task_context(
+        &self,
+        task: &Task<'a>,
+        resolved_inputs: HashMap<&'a str, Value<'a>>,
+    ) -> workflow::Result<TaskContext<'a>> {
+        Ok(TaskContext::builder()
+            .task_id(task.id())
+            .task_name(task.name())
+            .task_definition(task.definition())
+            .workflow_id(*self.workflow.id())
+            .description(*task.description())
+            .resolved_inputs(resolved_inputs)
+            .build()
+            .map_err(|_| ExecutionError::FailedToBuildTaskContext)?)
+    }
+
+    /// Finds all tasks reachable from a given trigger
     fn reachable_tasks(&self, trigger: &'a Trigger<'a>) -> HashSet<DependencyRef> {
         let mut visited = HashSet::new();
         let mut stack = vec![DependencyRef::from_trigger(trigger)];
@@ -209,6 +228,7 @@ impl<'a> WorkflowExecutor<'a> {
         visited
     }
 
+    /// Builds the execution graph for the workflow starting from a given trigger
     fn build_execution_graph(&self, trigger: &'a Trigger<'a>) -> workflow::Result<ExecutionGraph> {
         let mut graph = Graph::new();
         let mut index_map = HashMap::new();
