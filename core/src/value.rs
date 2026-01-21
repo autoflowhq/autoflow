@@ -11,6 +11,7 @@ pub enum Value<'a> {
     Boolean(bool),
     Json(serde_json::Value),
     FilePath(PathBuf),
+    Null,
 }
 
 impl<'a> Value<'a> {
@@ -23,6 +24,7 @@ impl<'a> Value<'a> {
             Value::Boolean(_) => DataType::Boolean,
             Value::Json(_) => DataType::Json,
             Value::FilePath(_) => DataType::File,
+            Value::Null => DataType::Null,
         }
     }
 }

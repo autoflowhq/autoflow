@@ -6,7 +6,7 @@ use getset::{Getters, Setters};
 use crate::task::{TaskStatus, Value};
 
 /// Represents the result of a task execution including status, outputs, logs, and metrics
-#[derive(Builder, Getters, Setters)]
+#[derive(Builder, Getters, Setters, Clone, Debug)]
 #[builder(pattern = "owned", setter(into))]
 pub struct TaskResult<'a> {
     /// Status of the task execution

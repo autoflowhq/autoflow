@@ -1,5 +1,6 @@
 use thiserror::Error;
 
+/// Errors that can occur during task definition or execution
 #[derive(Debug, Error)]
 pub enum TaskError {
     #[error("input '{input}' has incompatible type. expected '{expected}' but found '{found}'")]

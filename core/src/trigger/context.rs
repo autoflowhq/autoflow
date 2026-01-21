@@ -9,3 +9,10 @@ pub struct TriggerContext<'a> {
     #[getset(get_copy = "pub")]
     trigger_name: &'a str,
 }
+
+impl<'a> TriggerContext<'a> {
+    /// Creates a new builder for TriggerContext
+    pub fn builder() -> TriggerContextBuilder<'a> {
+        TriggerContextBuilder::default()
+    }
+}

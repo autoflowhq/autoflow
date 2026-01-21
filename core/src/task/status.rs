@@ -11,7 +11,7 @@ pub enum TaskStatus {
     Completed,
 
     /// Task execution has failed
-    Failed(&'static str),
+    Failed,
 }
 
 impl Default for TaskStatus {

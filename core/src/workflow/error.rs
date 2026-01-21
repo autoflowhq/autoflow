@@ -2,8 +2,12 @@
 use thiserror::Error;
 use uuid::Uuid;
 
-use crate::{task::DataType, workflow::ReferenceKind};
+use crate::{
+    task::DataType,
+    workflow::{DependencyRef, execution::ExecutionError},
+};
 
+/// Errors related to workflows that can occur during workflow definition, validation, or execution
 #[derive(Debug, Error)]
 pub enum WorkflowError {
     #[error("task {id} already exists in workflow")]
@@ -49,17 +53,19 @@ pub enum WorkflowError {
     InputNotInSchema { task_id: Uuid, input: String },
 
     #[error(
-        "type mismatch for input '{input}' in task '{task_id}': expected {expected}, but referenced output '{output}' from {reference_kind} ID {reference_id} is {found}"
+        "type mismatch for input '{input}' in task '{task_id}': expected {expected}, but referenced output '{output}' from {reference} is {found}"
     )]
     InputTypeMismatch {
         task_id: Uuid,
         input: String,
         expected: DataType,
         found: DataType,
-        reference_id: Uuid,
-        reference_kind: ReferenceKind,
+        reference: DependencyRef,
         output: String,
     },
+
+    #[error("execution error: {0}")]
+    Execution(#[from] ExecutionError),
 }
 
 pub type Result<T> = std::result::Result<T, WorkflowError>;

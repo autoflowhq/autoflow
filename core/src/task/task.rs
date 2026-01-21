@@ -1,13 +1,16 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use derive_builder::Builder;
 use getset::{CopyGetters, Getters, Setters};
 use uuid::Uuid;
 
-use crate::task::{InputBinding, TaskDefinition, TaskError, TaskStatus};
+use crate::{
+    task::{InputBinding, TaskDefinition, TaskError, TaskStatus},
+    workflow::DependencyRef,
+};
 
 /// Represents an instance of a Task within a workflow
-#[derive(Getters, Setters, CopyGetters, Builder, Debug, Clone)]
+#[derive(Getters, Setters, CopyGetters, Builder, Clone)]
 #[builder(pattern = "owned", setter(into), build_fn(validate = "Self::validate"))]
 pub struct Task<'a> {
     /// Unique identifier for the task
@@ -38,7 +41,7 @@ pub struct Task<'a> {
     /// execution order.
     #[getset(get = "pub", get_mut = "pub")]
     #[builder(default, setter(each = "dependency"))]
-    dependencies: Vec<Uuid>,
+    dependencies: HashSet<DependencyRef>,
 
     /// Current status of the task
     #[getset(get = "pub")]
@@ -63,13 +66,13 @@ impl<'a> Task<'a> {
     }
 
     /// Adds a dependency on another task by its UUID
-    pub fn add_dependency(&mut self, task_id: Uuid) {
-        self.dependencies.push(task_id);
+    pub fn add_dependency(&mut self, dependency: DependencyRef) {
+        self.dependencies.insert(dependency);
     }
 
     /// Removes a dependency on another task by its UUID
-    pub fn remove_dependency(&mut self, task_id: Uuid) {
-        self.dependencies.retain(|&id| id != task_id);
+    pub fn remove_dependency(&mut self, dependency: DependencyRef) {
+        self.dependencies.remove(&dependency);
     }
 
     /// Clears all dependencies
@@ -94,6 +97,47 @@ impl<'a> Task<'a> {
     /// Removes an input binding by key
     pub fn remove_input(&mut self, key: &str) {
         self.inputs.remove(key);
+    }
+
+    /// Retrieves all dependencies of the task, including dependencies via input bindings, as well
+    /// as explicit dependencies. Returns a tuple: (task dependencies, trigger dependencies).
+    pub fn get_all_dependencies(&self) -> Vec<DependencyRef> {
+        let mut deps = Vec::new();
+        // Collect from input bindings
+        for binding in self.inputs.values() {
+            if let InputBinding::Reference { ref_from, .. } = binding {
+                if !deps.contains(ref_from) {
+                    deps.push(ref_from.clone());
+                }
+            }
+        }
+        // Collect explicit dependencies
+        for dep in &self.dependencies {
+            if !deps.contains(dep) {
+                deps.push(dep.clone());
+            }
+        }
+        deps
+    }
+}
+
+impl<'a> PartialEq for Task<'a> {
+    fn eq(&self, other: &Self) -> bool {
+        self.id == other.id
+    }
+}
+
+impl<'a> Eq for Task<'a> {}
+
+use std::fmt;
+
+impl<'a> fmt::Debug for Task<'a> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Task")
+            .field("id", &self.id)
+            .field("name", &self.name)
+            // Add other fields as appropriate
+            .finish()
     }
 }
 

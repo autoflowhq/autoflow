@@ -5,21 +5,26 @@ use uuid::Uuid;
 use crate::{task::TaskDefinition, trigger::TriggerDefinition};
 use std::collections::HashMap;
 
-/// A Plugin encapsulates a set of tasks and triggers
-#[derive(Debug, Getters, Setters, Builder)]
+/// A Plugin encapsulates a set of tasks and triggers that can be registered and used within
+/// the workflow system.
+#[derive(Getters, Setters, Builder)]
 #[builder(pattern = "owned")]
 pub struct Plugin<'a> {
+    /// Unique identifier for the plugin
     #[getset(get = "pub")]
     #[builder(default = "Uuid::new_v4()")]
     id: Uuid,
 
+    /// Name of the plugin
     #[getset(get = "pub", set = "pub")]
     name: &'a str,
 
+    /// Tasks provided by the plugin
     #[getset(get = "pub")]
     #[builder(default)]
     tasks: HashMap<&'a str, TaskDefinition<'a>>,
 
+    /// Triggers provided by the plugin
     #[getset(get = "pub")]
     #[builder(default)]
     triggers: HashMap<&'a str, TriggerDefinition<'a>>,

@@ -2,6 +2,7 @@ mod context;
 mod datatype;
 mod definition;
 mod error;
+mod handler;
 mod result;
 mod schema;
 mod status;
@@ -11,6 +12,7 @@ pub use context::TaskContext;
 pub use datatype::DataType;
 pub use definition::TaskDefinition;
 pub use error::{Result, TaskError};
+pub use handler::{NoOpTaskHandler, TaskHandler};
 pub use result::TaskResult;
 pub use schema::{InputSpec, OutputSpec, TaskSchema};
 pub use status::TaskStatus;
@@ -18,7 +20,7 @@ pub use task::Task;
 
 use uuid::Uuid;
 
-use crate::Value;
+use crate::{Value, workflow::DependencyRef};
 
 /// Represents how a task input is bound to a value or another task's output
 /// It can be a literal value, a reference to another task's output, or a reference to a trigger's output.
@@ -27,23 +29,30 @@ pub enum InputBinding<'a> {
     /// A literal value
     Literal(Value<'a>),
 
-    /// Reference to another task's output
-    TaskReference { task_id: Uuid, output: &'a str },
-
-    /// Reference to a trigger's output
-    TriggerReference { trigger_id: Uuid, output: &'a str },
+    Reference {
+        /// ID of the referenced entity (task or trigger)
+        ref_from: DependencyRef,
+        /// Output key from the referenced entity
+        output: &'a str,
+    },
 }
 
 /// Convenience constructors for InputBinding enum variants
 impl<'a> InputBinding<'a> {
     /// Creates a TriggerReference variant
     pub fn trigger(trigger_id: Uuid, output: &'a str) -> Self {
-        InputBinding::TriggerReference { trigger_id, output }
+        InputBinding::Reference {
+            ref_from: DependencyRef::Trigger(trigger_id),
+            output,
+        }
     }
 
     /// Creates a TaskReference variant
     pub fn task(task_id: Uuid, output: &'a str) -> Self {
-        InputBinding::TaskReference { task_id, output }
+        InputBinding::Reference {
+            ref_from: DependencyRef::Task(task_id),
+            output,
+        }
     }
 
     /// Creates a Literal variant
@@ -71,7 +80,7 @@ mod tests {
         let def = TaskDefinition::builder()
             .name("test")
             .schema(schema)
-            .execute(|_| TaskResult::default())
+            .handler(Box::new(NoOpTaskHandler))
             .build()
             .unwrap();
 
@@ -83,11 +92,7 @@ mod tests {
             .input(("foo", InputBinding::literal(Value::String("not an int"))))
             .build();
 
-        assert!(
-            result.is_err(),
-            "Expected error for type mismatch, got: {:?}",
-            result
-        );
+        assert!(result.is_err(), "Expected error for type mismatch",);
         let err = result.unwrap_err();
         assert!(
             err.to_string().contains("incompatible type"),

@@ -11,11 +11,50 @@ pub use value::Value;
 
 #[cfg(test)]
 pub mod test {
+    use std::collections::HashMap;
+
     use crate::{
+        Value,
         plugin::{Plugin, Registry},
-        task::{DataType, InputSpec, OutputSpec},
+        task::{DataType, InputSpec, OutputSpec, TaskContext, TaskHandler, TaskResult},
         trigger::{TriggerDefinition, TriggerResult, TriggerSchema},
+        workflow::{DependencyRef, execution::WorkflowExecutor},
     };
+
+    struct ResizeImageHandler;
+
+    impl TaskHandler for ResizeImageHandler {
+        fn execute<'a>(&self, _inputs: &TaskContext<'a>) -> TaskResult<'a> {
+            let outputs = [("resized_file", Value::String("resized_image.jpg"))];
+            TaskResult::builder().outputs(outputs).build().unwrap()
+        }
+    }
+
+    struct CompressImageHandler;
+
+    impl TaskHandler for CompressImageHandler {
+        fn execute<'a>(&self, _inputs: &TaskContext<'a>) -> TaskResult<'a> {
+            let outputs = [("compressed_file", Value::String("compressed_image.jpg"))];
+            TaskResult::builder().outputs(outputs).build().unwrap()
+        }
+    }
+
+    struct UploadFileHandler;
+
+    impl TaskHandler for UploadFileHandler {
+        fn execute<'a>(&self, _inputs: &TaskContext<'a>) -> TaskResult<'a> {
+            TaskResult::default()
+        }
+    }
+
+    struct GenerateThumbnailHandler;
+
+    impl TaskHandler for GenerateThumbnailHandler {
+        fn execute<'a>(&self, _inputs: &TaskContext<'a>) -> TaskResult<'a> {
+            let outputs = [("thumbnail_file", Value::String("thumbnail_image.jpg"))];
+            TaskResult::builder().outputs(outputs).build().unwrap()
+        }
+    }
 
     #[test]
     fn test_all() {
@@ -23,14 +62,13 @@ pub mod test {
 
         use crate::{
             Value,
-            task::{InputBinding, Task, TaskDefinition, TaskResult, TaskSchema},
+            task::{InputBinding, Task, TaskDefinition, TaskSchema},
             trigger::Trigger,
             workflow::Workflow,
         };
 
         let file_added_trigger = TriggerDefinition::builder()
             .name("file_added")
-            .triggered(|_ctx| TriggerResult::default())
             .schema(
                 TriggerSchema::builder()
                     .output(("file_path", DataType::File))
@@ -51,7 +89,7 @@ pub mod test {
                     .build()
                     .unwrap(),
             )
-            .execute(|_ctx| TaskResult::default())
+            .handler(Box::new(ResizeImageHandler))
             .build()
             .unwrap();
 
@@ -64,7 +102,7 @@ pub mod test {
                     .build()
                     .unwrap(),
             )
-            .execute(|_ctx| TaskResult::default())
+            .handler(Box::new(CompressImageHandler))
             .build()
             .unwrap();
 
@@ -77,7 +115,7 @@ pub mod test {
                     .build()
                     .unwrap(),
             )
-            .execute(|_ctx| TaskResult::default())
+            .handler(Box::new(UploadFileHandler))
             .build()
             .unwrap();
 
@@ -89,7 +127,7 @@ pub mod test {
                     .build()
                     .unwrap(),
             )
-            .execute(|_ctx| TaskResult::default())
+            .handler(Box::new(GenerateThumbnailHandler))
             .build()
             .unwrap();
 
@@ -144,7 +182,7 @@ pub mod test {
             ))
             .input(("width", InputBinding::literal(Value::Integer(1920))))
             .input(("height", InputBinding::literal(Value::Integer(1080))))
-            .dependency(new_file_trigger.id())
+            .dependency(DependencyRef::from_trigger(&new_file_trigger))
             .build()
             .unwrap();
 
@@ -190,10 +228,24 @@ pub mod test {
             .build()
             .unwrap();
 
+        let new_file_trigger_id = new_file_trigger.id();
+
         wf.add_trigger(new_file_trigger);
         wf.add_task(resize).unwrap();
         wf.add_task(compress).unwrap();
         wf.add_task(upload).unwrap();
         wf.add_task(thumbnail).unwrap();
+
+        let mut executor = WorkflowExecutor::builder()
+            .workflow(&wf)
+            .plugins(&registry)
+            .build()
+            .unwrap();
+        let mut outputs = HashMap::new();
+        outputs.insert("file_path", Value::String("/Downloads/image1.jpg"));
+        let result = TriggerResult::builder().outputs(outputs).build().unwrap();
+        executor
+            .execute_from_trigger(new_file_trigger_id, result)
+            .unwrap();
     }
 }

@@ -9,6 +9,7 @@ pub enum DataType {
     Boolean,
     Json,
     File,
+    Null,
 }
 
 impl std::fmt::Display for DataType {
@@ -20,6 +21,7 @@ impl std::fmt::Display for DataType {
             DataType::Boolean => "boolean",
             DataType::Json => "json",
             DataType::File => "file",
+            DataType::Null => "null",
         };
         write!(f, "{}", type_str)
     }

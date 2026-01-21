@@ -1,5 +1,8 @@
+mod context;
 mod error;
+pub mod execution;
 
+pub use context::WorkflowExecutionContext;
 pub use error::{Result, WorkflowError};
 
 use crate::{
@@ -9,29 +12,45 @@ use crate::{
 
 use derive_builder::Builder;
 use getset::{Getters, Setters};
-use std::collections::HashMap;
+use std::{
+    collections::{HashMap, HashSet},
+    fmt::Display,
+};
 use uuid::Uuid;
 
-/// Enum to distinguish between Task and Trigger references
-#[derive(Debug)]
-pub enum ReferenceKind {
-    Task,
-    Trigger,
+/// Reference to either a Task or a Trigger within the Workflow
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum DependencyRef {
+    Task(Uuid),
+    Trigger(Uuid),
 }
 
-impl std::fmt::Display for ReferenceKind {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let s = match self {
-            ReferenceKind::Task => "task",
-            ReferenceKind::Trigger => "trigger",
-        };
-        write!(f, "{}", s)
+impl DependencyRef {
+    /// Get the UUID of the referenced entity
+    pub fn id(&self) -> Uuid {
+        match self {
+            DependencyRef::Task(id) => *id,
+            DependencyRef::Trigger(id) => *id,
+        }
+    }
+
+    /// Create a DependencyRef from a Task
+    pub fn from_task(task: &Task) -> Self {
+        DependencyRef::Task(task.id())
+    }
+
+    /// Create a DependencyRef from a Trigger
+    pub fn from_trigger(trigger: &Trigger) -> Self {
+        DependencyRef::Trigger(trigger.id())
     }
 }
 
-impl From<ReferenceKind> for String {
-    fn from(kind: ReferenceKind) -> Self {
-        kind.to_string()
+impl Display for DependencyRef {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            DependencyRef::Task(id) => write!(f, "Task({})", id),
+            DependencyRef::Trigger(id) => write!(f, "Trigger({})", id),
+        }
     }
 }
 
@@ -54,12 +73,12 @@ pub struct Workflow<'a> {
 
     /// Tasks within the workflow
     #[getset(get = "pub")]
-    #[builder(default)]
+    #[builder(default, setter(each = "task"))]
     tasks: HashMap<Uuid, Task<'a>>,
 
     /// Triggers within the workflow
     #[getset(get = "pub")]
-    #[builder(default)]
+    #[builder(default, setter(each = "trigger"))]
     triggers: HashMap<Uuid, Trigger<'a>>,
 }
 
@@ -81,26 +100,8 @@ impl<'a> Workflow<'a> {
     /// Validate that all input types for a task match the types of the referenced outputs
     fn validate_task_input_types(&self, task: &Task<'a>) -> Result<()> {
         for (input_key, binding) in task.inputs() {
-            match binding {
-                InputBinding::TaskReference { task_id, output } => {
-                    self.validate_reference(
-                        task,
-                        input_key,
-                        *task_id,
-                        output,
-                        ReferenceKind::Task,
-                    )?;
-                }
-                InputBinding::TriggerReference { trigger_id, output } => {
-                    self.validate_reference(
-                        task,
-                        input_key,
-                        *trigger_id,
-                        output,
-                        ReferenceKind::Trigger,
-                    )?;
-                }
-                _ => {}
+            if let InputBinding::Reference { ref_from, output } = binding {
+                self.validate_reference(task, input_key, *ref_from, output)?;
             }
         }
         Ok(())
@@ -111,9 +112,8 @@ impl<'a> Workflow<'a> {
         &self,
         task: &Task<'a>,
         input_key: &str,
-        ref_from: Uuid,
+        ref_from: DependencyRef,
         output_key: &str,
-        kind: ReferenceKind,
     ) -> Result<()> {
         // Get the input spec from the task's schema
         let input_spec = task
@@ -127,14 +127,15 @@ impl<'a> Workflow<'a> {
             })?;
 
         // Get the referenced output spec
-        let output_type: &DataType = match kind {
-            ReferenceKind::Task => {
-                let referenced_task = self.tasks.get(&ref_from).ok_or_else(|| {
-                    WorkflowError::MissingTaskDependency {
-                        input: input_key.to_string(),
-                        id: ref_from,
-                    }
-                })?;
+        let output_type: &DataType = match ref_from {
+            DependencyRef::Task(id) => {
+                let referenced_task =
+                    self.tasks
+                        .get(&id)
+                        .ok_or_else(|| WorkflowError::MissingTaskDependency {
+                            input: input_key.to_string(),
+                            id,
+                        })?;
                 referenced_task
                     .definition()
                     .schema()
@@ -143,15 +144,15 @@ impl<'a> Workflow<'a> {
                     .ok_or_else(|| WorkflowError::MissingTaskOutput {
                         input: input_key.to_string(),
                         output: output_key.to_string(),
-                        id: ref_from,
+                        id,
                     })?
                     .data_type()
             }
-            ReferenceKind::Trigger => {
-                let referenced_trigger = self.triggers.get(&ref_from).ok_or_else(|| {
+            DependencyRef::Trigger(id) => {
+                let referenced_trigger = self.triggers.get(&id).ok_or_else(|| {
                     WorkflowError::MissingTriggerDependency {
                         input: input_key.to_string(),
-                        id: ref_from,
+                        id,
                     }
                 })?;
                 referenced_trigger
@@ -162,7 +163,7 @@ impl<'a> Workflow<'a> {
                     .ok_or_else(|| WorkflowError::MissingTriggerOutput {
                         input: input_key.to_string(),
                         output: output_key.to_string(),
-                        id: ref_from,
+                        id,
                     })?
             }
         };
@@ -174,8 +175,7 @@ impl<'a> Workflow<'a> {
                 input: input_key.to_string(),
                 expected: input_spec.data_type().clone(),
                 found: output_type.clone(),
-                reference_id: ref_from,
-                reference_kind: kind,
+                reference: ref_from,
                 output: output_key.to_string(),
             });
         }
@@ -189,67 +189,67 @@ impl<'a> Workflow<'a> {
     }
 
     /// Generalized method to find all tasks that depend on a given predicate over InputBinding
-    fn find_tasks_with_input_binding<F>(&self, mut pred: F) -> Vec<Uuid>
+    #[allow(dead_code)]
+    fn find_tasks_with_input_binding<F>(&self, mut pred: F) -> Vec<DependencyRef>
     where
-        F: FnMut(&InputBinding<'a>) -> bool,
+        F: FnMut(&InputBinding<'a>) -> Option<DependencyRef>,
     {
-        self.tasks
-            .iter()
-            .filter_map(|(&id, t)| {
-                if t.inputs().values().any(|b| pred(b)) {
-                    Some(id)
-                } else {
-                    None
+        let mut refs = Vec::new();
+        for (&_, t) in &self.tasks {
+            for b in t.inputs().values() {
+                if let Some(dep_ref) = pred(b) {
+                    refs.push(dep_ref);
                 }
+            }
+        }
+        refs
+    }
+
+    /// Find all tasks that depend on a given DependencyRef (directly or via inputs)
+    fn find_tasks_depending_on(&self, dep_ref: &DependencyRef) -> HashSet<DependencyRef> {
+        self.tasks
+            .values()
+            .filter(|t| {
+                let input_ref_found = t.inputs().values().any(|b| {
+                matches!(b, InputBinding::Reference { ref_from, .. } if ref_from == dep_ref)
+            });
+                let depends_on_found = t.dependencies().contains(dep_ref);
+                input_ref_found || depends_on_found
             })
+            .map(|t| DependencyRef::Task(t.id()))
             .collect()
     }
 
-    /// Find all tasks that depend on a given task ID (directly or via inputs)
-    fn find_tasks_depending_on_task(&self, task_id: Uuid) -> Vec<Uuid> {
-        let mut ids = self.find_tasks_with_input_binding(
-            |b| matches!(b, InputBinding::TaskReference { task_id: tid, .. } if *tid == task_id),
-        );
-        // Also include tasks that have this task_id in their depends_on
-        ids.extend(self.tasks.iter().filter_map(|(&id, t)| {
-            if t.dependencies().contains(&task_id) {
-                Some(id)
-            } else {
-                None
-            }
-        }));
-        ids.sort();
-        ids.dedup();
-        ids
-    }
-
-    /// Find all tasks that depend on a given trigger ID (via inputs)
-    fn find_tasks_depending_on_trigger(&self, trigger_id: Uuid) -> Vec<Uuid> {
-        self.find_tasks_with_input_binding(|b| {
-            matches!(b, InputBinding::TriggerReference { trigger_id: tid, .. } if *tid == trigger_id)
-        })
-    }
-
     /// Helper to detach references from dependents for both tasks and triggers
-    fn detach_references<F>(&mut self, dependents: Vec<Uuid>, mut should_remove: F)
-    where
-        F: FnMut(&InputBinding<'a>, Uuid) -> bool,
-    {
+    fn detach_references(&mut self, dependents: Vec<Uuid>, dep_ref: &DependencyRef) {
         for dep_id in dependents {
             if let Some(dep_task) = self.tasks.get_mut(&dep_id) {
                 // Remove from depends_on
-                dep_task.remove_dependency(dep_id);
+                match dep_ref {
+                    DependencyRef::Task(_) => dep_task.remove_dependency(*dep_ref),
+                    DependencyRef::Trigger(_) => dep_task.remove_dependency(*dep_ref),
+                }
 
                 // Collect keys to remove first
                 let keys_to_remove: Vec<_> = dep_task
                     .inputs()
                     .iter()
-                    .filter_map(|(&key, binding)| {
-                        if should_remove(binding, dep_id) {
-                            Some(key)
-                        } else {
-                            None
-                        }
+                    .filter_map(|(&key, binding)| match (dep_ref, binding) {
+                        (
+                            DependencyRef::Task(task_id),
+                            InputBinding::Reference {
+                                ref_from: DependencyRef::Task(tid),
+                                ..
+                            },
+                        ) if tid == task_id => Some(key),
+                        (
+                            DependencyRef::Trigger(trigger_id),
+                            InputBinding::Reference {
+                                ref_from: DependencyRef::Trigger(tid),
+                                ..
+                            },
+                        ) if tid == trigger_id => Some(key),
+                        _ => None,
                     })
                     .collect();
 
@@ -261,8 +261,22 @@ impl<'a> Workflow<'a> {
         }
     }
 
+    /// Removes a task from the workflow, handling dependents based on the specified DeleteMode.
+    /// There are three modes:
+    /// - Strict: Returns an error if dependents exist.
+    /// - Cascade: Removes dependents recursively.
+    /// - Detach: Keeps dependents but removes references to the deleted task.
+    /// # Errors
+    /// - `WorkflowError::TaskHasDependents` if in Strict mode and dependents exist.
+    /// - Errors from removing dependent tasks in Cascade mode.
+    /// - Errors from detaching references in Detach mode.  
     pub fn remove_task(&mut self, task_id: Uuid, mode: DeleteMode) -> Result<()> {
-        let dependents = self.find_tasks_depending_on_task(task_id);
+        let dep_ref = DependencyRef::Task(task_id);
+        let dependents: Vec<Uuid> = self
+            .find_tasks_depending_on(&dep_ref)
+            .iter()
+            .map(|t| t.id())
+            .collect();
 
         match mode {
             DeleteMode::Strict => {
@@ -275,14 +289,12 @@ impl<'a> Workflow<'a> {
                 }
             }
             DeleteMode::Cascade => {
-                for dep_id in dependents {
-                    self.remove_task(dep_id, DeleteMode::Cascade)?;
+                for dep_id in &dependents {
+                    self.remove_task(*dep_id, DeleteMode::Cascade)?;
                 }
             }
             DeleteMode::Detach => {
-                self.detach_references(dependents, |binding, _id| {
-                    matches!(binding, InputBinding::TaskReference { task_id: tid, .. } if *tid == task_id)
-                });
+                self.detach_references(dependents, &dep_ref);
             }
         }
 
@@ -290,8 +302,22 @@ impl<'a> Workflow<'a> {
         Ok(())
     }
 
+    /// Removes a trigger from the workflow, handling dependents based on the specified DeleteMode.
+    /// There are three modes:
+    /// - Strict: Returns an error if dependents exist.
+    /// - Cascade: Removes dependents recursively.
+    /// - Detach: Keeps dependents but removes references to the deleted trigger.
+    /// # Errors
+    /// - `WorkflowError::TriggerHasDependents` if in Strict mode and dependents exist.
+    /// - Errors from removing dependent tasks in Cascade mode.
+    /// - Errors from detaching references in Detach mode.
     pub fn remove_trigger(&mut self, trigger_id: Uuid, mode: DeleteMode) -> Result<()> {
-        let dependents = self.find_tasks_depending_on_trigger(trigger_id);
+        let dep_ref = DependencyRef::Trigger(trigger_id);
+        let dependents: Vec<Uuid> = self
+            .find_tasks_depending_on(&dep_ref)
+            .iter()
+            .map(|t| t.id())
+            .collect();
 
         match mode {
             DeleteMode::Strict => {
@@ -303,14 +329,12 @@ impl<'a> Workflow<'a> {
                 }
             }
             DeleteMode::Cascade => {
-                for dep_id in dependents {
-                    self.remove_task(dep_id, DeleteMode::Cascade)?;
+                for dep_id in &dependents {
+                    self.remove_task(*dep_id, DeleteMode::Cascade)?;
                 }
             }
             DeleteMode::Detach => {
-                self.detach_references(dependents, |binding, _id| {
-                    matches!(binding, InputBinding::TriggerReference { trigger_id: tid, .. } if *tid == trigger_id)
-                });
+                self.detach_references(dependents, &dep_ref);
             }
         }
 
@@ -318,16 +342,29 @@ impl<'a> Workflow<'a> {
         Ok(())
     }
 
+    /// Verifies that all dependencies of a task exist within the workflow
     fn verify_task_dependencies(&self, task: &Task<'a>) -> Result<()> {
-        for dep_id in task.dependencies() {
-            if !self.tasks.contains_key(dep_id) && !self.triggers.contains_key(dep_id) {
-                return Err(WorkflowError::MissingDependency { id: *dep_id });
+        for dep in task.dependencies() {
+            match dep {
+                DependencyRef::Task(dep_id) => {
+                    if !self.tasks.contains_key(dep_id) {
+                        return Err(WorkflowError::MissingDependency { id: *dep_id });
+                    }
+                }
+                DependencyRef::Trigger(dep_id) => {
+                    if !self.triggers.contains_key(dep_id) {
+                        return Err(WorkflowError::MissingDependency { id: *dep_id });
+                    }
+                }
             }
         }
 
         for (input, binding) in task.inputs() {
             match binding {
-                InputBinding::TaskReference { task_id, output } => {
+                InputBinding::Reference {
+                    ref_from: DependencyRef::Task(task_id),
+                    output,
+                } => {
                     if !self.tasks.contains_key(task_id) {
                         Err(WorkflowError::MissingTaskDependency {
                             input: input.to_string(),
@@ -348,7 +385,10 @@ impl<'a> Workflow<'a> {
                         })?;
                     }
                 }
-                InputBinding::TriggerReference { trigger_id, output } => {
+                InputBinding::Reference {
+                    ref_from: DependencyRef::Trigger(trigger_id),
+                    output,
+                } => {
                     if !self.triggers.contains_key(trigger_id) {
                         Err(WorkflowError::MissingTriggerDependency {
                             input: input.to_string(),
@@ -376,19 +416,27 @@ impl<'a> Workflow<'a> {
     }
 }
 
+/// Modes for deleting tasks or triggers from a workflow
+#[derive(Debug, Clone, Copy)]
 pub enum DeleteMode {
-    Strict,  // panic / return error if dependents exist
-    Cascade, // remove dependents recursively
-    Detach,  // keep dependents, just remove references to the deleted entity
+    /// Strict mode: Returns an error if dependents exist.
+    Strict,
+
+    /// Cascade mode: Removes dependents recursively.
+    Cascade,
+
+    /// Detach mode: Keeps dependents but removes references to the deleted entity.
+    Detach,
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::task::{
-        DataType, InputBinding, InputSpec, OutputSpec, Task, TaskDefinition, TaskResult, TaskSchema,
+        DataType, InputBinding, InputSpec, NoOpTaskHandler, OutputSpec, Task, TaskDefinition,
+        TaskSchema,
     };
-    use crate::trigger::{Trigger, TriggerDefinition, TriggerResult, TriggerSchema};
+    use crate::trigger::{Trigger, TriggerDefinition, TriggerSchema};
     use uuid::Uuid;
 
     fn dummy_task_def<'a>() -> TaskDefinition<'a> {
@@ -400,7 +448,7 @@ mod tests {
                     .build()
                     .unwrap(),
             )
-            .execute(|_| TaskResult::default())
+            .handler(Box::new(NoOpTaskHandler))
             .build()
             .unwrap()
     }
@@ -414,7 +462,6 @@ mod tests {
                     .build()
                     .unwrap(),
             )
-            .triggered(|_| TriggerResult::default())
             .build()
             .unwrap()
     }
@@ -431,7 +478,7 @@ mod tests {
             .unwrap();
         // Add a fake dependency
         let missing_id = Uuid::new_v4();
-        task.add_dependency(missing_id);
+        task.add_dependency(DependencyRef::Task(missing_id));
         let res = wf.add_task(task);
         assert!(res.is_err());
         if let Err(e) = res {
@@ -460,7 +507,7 @@ mod tests {
             .id(t2_id)
             .name("t2")
             .definition(&def)
-            .dependencies(vec![t1_id])
+            .dependencies([DependencyRef::Task(t1_id)])
             .build()
             .unwrap();
         wf.add_task(t1).unwrap();
@@ -486,7 +533,7 @@ mod tests {
             .id(t2_id)
             .name("t2")
             .definition(&def)
-            .dependencies(vec![t1_id])
+            .dependencies([DependencyRef::Task(t1_id)])
             .build()
             .unwrap();
         wf.add_task(t1).unwrap();
@@ -512,7 +559,7 @@ mod tests {
             .id(t2_id)
             .name("t2")
             .definition(&def)
-            .dependencies(vec![t1_id])
+            .dependencies([DependencyRef::Task(t1_id)])
             .build()
             .unwrap();
         wf.add_task(t1).unwrap();
@@ -543,8 +590,8 @@ mod tests {
             .definition(&def)
             .input((
                 "foo",
-                InputBinding::TriggerReference {
-                    trigger_id,
+                InputBinding::Reference {
+                    ref_from: DependencyRef::Trigger(trigger_id),
                     output: "bar",
                 },
             ))
@@ -569,7 +616,7 @@ mod tests {
                     .build()
                     .unwrap(),
             )
-            .execute(|_| TaskResult::default())
+            .handler(Box::new(NoOpTaskHandler))
             .build()
             .unwrap();
         let t1_id = Uuid::new_v4();
@@ -590,7 +637,7 @@ mod tests {
                     .build()
                     .unwrap(),
             )
-            .execute(|_| TaskResult::default())
+            .handler(Box::new(NoOpTaskHandler))
             .build()
             .unwrap();
         let t2 = Task::builder()
@@ -599,8 +646,8 @@ mod tests {
             .definition(&def2)
             .input((
                 "foo",
-                InputBinding::TaskReference {
-                    task_id: t1_id,
+                InputBinding::Reference {
+                    ref_from: DependencyRef::Task(t1_id),
                     output: "out",
                 },
             ))
@@ -617,8 +664,7 @@ mod tests {
                     input,
                     expected,
                     found,
-                    reference_id: _,
-                    reference_kind: _,
+                    reference: _,
                     output: _,
                 } => {
                     assert_eq!(input, "foo");
@@ -643,7 +689,6 @@ mod tests {
                     .build()
                     .unwrap(),
             )
-            .triggered(|_| TriggerResult::default())
             .build()
             .unwrap();
         let trigger_id = Uuid::new_v4();
@@ -664,7 +709,7 @@ mod tests {
                     .build()
                     .unwrap(),
             )
-            .execute(|_| TaskResult::default())
+            .handler(Box::new(NoOpTaskHandler))
             .build()
             .unwrap();
         let t = Task::builder()
@@ -673,8 +718,8 @@ mod tests {
             .definition(&def)
             .input((
                 "foo",
-                InputBinding::TriggerReference {
-                    trigger_id,
+                InputBinding::Reference {
+                    ref_from: DependencyRef::Trigger(trigger_id),
                     output: "bar",
                 },
             ))
@@ -691,8 +736,7 @@ mod tests {
                     input,
                     expected,
                     found,
-                    reference_id: _,
-                    reference_kind: _,
+                    reference: _,
                     output: _,
                 } => {
                     assert_eq!(input, "foo");
@@ -717,7 +761,7 @@ mod tests {
                     .build()
                     .unwrap(),
             )
-            .execute(|_| TaskResult::default())
+            .handler(Box::new(NoOpTaskHandler))
             .build()
             .unwrap();
         let t1_id = Uuid::new_v4();
@@ -738,7 +782,7 @@ mod tests {
                     .build()
                     .unwrap(),
             )
-            .execute(|_| TaskResult::default())
+            .handler(Box::new(NoOpTaskHandler))
             .build()
             .unwrap();
         let t2 = Task::builder()
@@ -747,8 +791,8 @@ mod tests {
             .definition(&def2)
             .input((
                 "foo",
-                InputBinding::TaskReference {
-                    task_id: t1_id,
+                InputBinding::Reference {
+                    ref_from: DependencyRef::Task(t1_id),
                     output: "out",
                 },
             ))
@@ -772,7 +816,6 @@ mod tests {
                     .build()
                     .unwrap(),
             )
-            .triggered(|_| TriggerResult::default())
             .build()
             .unwrap();
         let trigger_id = Uuid::new_v4();
@@ -793,7 +836,7 @@ mod tests {
                     .build()
                     .unwrap(),
             )
-            .execute(|_| TaskResult::default())
+            .handler(Box::new(NoOpTaskHandler))
             .build()
             .unwrap();
         let t = Task::builder()
@@ -802,8 +845,8 @@ mod tests {
             .definition(&def)
             .input((
                 "foo",
-                InputBinding::TriggerReference {
-                    trigger_id,
+                InputBinding::Reference {
+                    ref_from: DependencyRef::Trigger(trigger_id),
                     output: "bar",
                 },
             ))

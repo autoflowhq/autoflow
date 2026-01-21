@@ -6,7 +6,7 @@ use uuid::Uuid;
 
 use crate::{
     logger::{Logger, ProgressReporter},
-    task::{TaskStatus, Value},
+    task::{TaskDefinition, TaskStatus, Value},
 };
 
 /// Contextual information available during task execution
@@ -19,6 +19,10 @@ pub struct TaskContext<'a> {
     /// Name of the task
     #[getset(get = "pub")]
     task_name: &'a str,
+
+    /// Definition of the task
+    #[getset(get = "pub")]
+    task_definition: &'a TaskDefinition<'a>,
 
     /// Identifier of the workflow this task belongs to
     #[getset(get_copy = "pub")]
@@ -54,11 +58,18 @@ pub struct TaskContext<'a> {
 
     /// Logging & progress
     #[getset(get = "pub")]
-    logger: &'a dyn Logger,
-    #[getset(get = "pub")]
-    progress: &'a dyn ProgressReporter,
+    #[builder(default)]
+    logger: Option<&'a dyn Logger>,
 
-    /// Workflow-level parameters
+    /// Progress reporter for the task execution
     #[getset(get = "pub")]
-    workflow_params: &'a HashMap<String, Value<'a>>,
+    #[builder(default)]
+    progress: Option<&'a dyn ProgressReporter>,
+}
+
+impl<'a> TaskContext<'a> {
+    /// Creates a new builder for TaskContext
+    pub fn builder() -> TaskContextBuilder<'a> {
+        TaskContextBuilder::default()
+    }
 }

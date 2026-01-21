@@ -1,11 +1,11 @@
 use derive_builder::Builder;
 use getset::{Getters, Setters};
 
-use crate::task::{TaskContext, TaskResult, TaskSchema};
+use crate::task::{TaskContext, TaskHandler, TaskResult, TaskSchema};
 
 /// Definition of a kind of  Task within the workflow system.
 /// This is independent of any specific instance of a Task.
-#[derive(Builder, Getters, Setters, Debug)]
+#[derive(Builder, Getters, Setters)]
 #[builder(pattern = "owned")]
 pub struct TaskDefinition<'a> {
     /// Name of the task
@@ -19,12 +19,17 @@ pub struct TaskDefinition<'a> {
 
     /// Function that is called to execute the task
     #[getset(get = "pub")]
-    execute: fn(&TaskContext) -> TaskResult<'a>,
+    handler: Box<dyn TaskHandler>,
 }
 
 impl<'a> TaskDefinition<'a> {
     /// Creates a new builder for TaskDefinition
     pub fn builder() -> TaskDefinitionBuilder<'a> {
         TaskDefinitionBuilder::default()
+    }
+
+    /// Execute the task with the given context
+    pub fn execute(&self, ctx: &TaskContext<'a>) -> TaskResult<'a> {
+        self.handler.execute(ctx)
     }
 }

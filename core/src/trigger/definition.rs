@@ -1,7 +1,7 @@
 use derive_builder::Builder;
 use getset::{Getters, Setters};
 
-use crate::trigger::{TriggerContext, TriggerResult, TriggerSchema};
+use crate::trigger::TriggerSchema;
 
 /// Definition of a kind of Trigger within the workflow system.
 /// This is independent of any specific instance of a Trigger.
@@ -18,10 +18,6 @@ pub struct TriggerDefinition<'a> {
     #[builder(default)]
     #[getset(get = "pub")]
     schema: TriggerSchema<'a>,
-
-    /// Function called when the trigger is evaluated
-    #[getset(get = "pub")]
-    triggered: fn(&TriggerContext<'a>) -> TriggerResult,
 }
 
 impl<'a> TriggerDefinition<'a> {
