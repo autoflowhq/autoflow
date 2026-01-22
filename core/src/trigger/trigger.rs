@@ -7,7 +7,7 @@ use uuid::Uuid;
 use crate::{Value, trigger::TriggerDefinition};
 
 /// Represents a Trigger in the workflow
-#[derive(Getters, Setters, CopyGetters, Builder, Clone)]
+#[derive(Getters, Setters, CopyGetters, Builder, Clone, Debug)]
 #[builder(pattern = "owned", setter(into))]
 pub struct Trigger<'a> {
     /// Unique identifier for the trigger

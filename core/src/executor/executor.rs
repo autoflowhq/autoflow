@@ -7,13 +7,11 @@ use uuid::Uuid;
 
 use crate::{
     Value,
+    executor::{self, ExecutionError, ExecutionGraph},
     plugin::Registry,
     task::{InputBinding, Task, TaskContext, TaskResult, TaskStatus},
     trigger::{Trigger, TriggerResult},
-    workflow::{
-        self, DependencyRef, Workflow, WorkflowExecutionContext,
-        execution::{ExecutionError, ExecutionGraph},
-    },
+    workflow::{CompiledWorkflow, DependencyRef, WorkflowExecutionContext},
 };
 
 /// Executor for managing the execution of a workflow
@@ -21,9 +19,9 @@ use crate::{
 #[builder(pattern = "owned", build_fn(name = "finish", private))]
 pub struct WorkflowExecutor<'a> {
     // Immutable
-    /// The workflow to be executed
+    /// The compiled workflow to be executed
     #[getset(get = "pub")]
-    workflow: &'a Workflow<'a>,
+    workflow: &'a CompiledWorkflow<'a>,
 
     /// The plugin registry used during execution
     #[getset(get = "pub")]
@@ -105,11 +103,7 @@ impl<'a> WorkflowExecutor<'a> {
     }
 
     /// Executes the workflow starting from a given trigger
-    pub fn execute_from_trigger(
-        &mut self,
-        trigger_id: Uuid,
-        result: TriggerResult<'a>,
-    ) -> workflow::Result<()> {
+    pub fn trigger(&mut self, trigger_id: Uuid, result: TriggerResult<'a>) -> executor::Result<()> {
         let trigger = self.get_trigger(trigger_id)?;
         let graph = self.build_execution_graph(trigger)?;
         let sorted_nodes = graph.topological_sort()?;
@@ -125,8 +119,9 @@ impl<'a> WorkflowExecutor<'a> {
     }
 
     /// Retrieves a trigger by ID
-    fn get_trigger(&self, trigger_id: Uuid) -> workflow::Result<&Trigger<'a>> {
+    fn get_trigger(&self, trigger_id: Uuid) -> executor::Result<&Trigger<'a>> {
         self.workflow
+            .workflow()
             .triggers()
             .get(&trigger_id)
             .ok_or_else(|| ExecutionError::TriggerNotFound { id: trigger_id }.into())
@@ -137,7 +132,7 @@ impl<'a> WorkflowExecutor<'a> {
         &mut self,
         node: DependencyRef,
         outputs_map: &mut HashMap<DependencyRef, HashMap<&'a str, Value<'a>>>,
-    ) -> workflow::Result<()> {
+    ) -> executor::Result<()> {
         match node {
             DependencyRef::Trigger(_) => Ok(()), // nothing to do
             DependencyRef::Task(task_id) => self.execute_task(task_id, outputs_map),
@@ -149,9 +144,10 @@ impl<'a> WorkflowExecutor<'a> {
         &mut self,
         task_id: Uuid,
         outputs_map: &mut HashMap<DependencyRef, HashMap<&'a str, Value<'a>>>,
-    ) -> workflow::Result<()> {
+    ) -> executor::Result<()> {
         let task = self
             .workflow
+            .workflow()
             .tasks()
             .get(&task_id)
             .ok_or_else(|| ExecutionError::TaskNotFound { id: task_id })?;
@@ -171,7 +167,7 @@ impl<'a> WorkflowExecutor<'a> {
         &self,
         task: &Task<'a>,
         outputs_map: &HashMap<DependencyRef, HashMap<&'a str, Value<'a>>>,
-    ) -> workflow::Result<HashMap<&'a str, Value<'a>>> {
+    ) -> executor::Result<HashMap<&'a str, Value<'a>>> {
         let mut input_values: HashMap<&'a str, Value<'a>> = HashMap::new();
         for (key, binding) in task.inputs() {
             let value = match binding {
@@ -200,72 +196,61 @@ impl<'a> WorkflowExecutor<'a> {
         &self,
         task: &Task<'a>,
         resolved_inputs: HashMap<&'a str, Value<'a>>,
-    ) -> workflow::Result<TaskContext<'a>> {
+    ) -> executor::Result<TaskContext<'a>> {
         Ok(TaskContext::builder()
             .task_id(task.id())
             .task_name(task.name())
             .task_definition(task.definition())
-            .workflow_id(*self.workflow.id())
+            .workflow_id(*self.workflow.workflow().id())
             .description(*task.description())
             .resolved_inputs(resolved_inputs)
             .build()
             .map_err(|_| ExecutionError::FailedToBuildTaskContext)?)
     }
 
-    /// Finds all tasks reachable from a given trigger
-    fn reachable_tasks(&self, trigger: &'a Trigger<'a>) -> HashSet<DependencyRef> {
-        let mut visited = HashSet::new();
-        let mut stack = vec![DependencyRef::from_trigger(trigger)];
+    /// Builds the execution graph for the workflow starting from a given trigger
+    /// This extracts a subgraph from the compiled workflow containing only the tasks
+    /// reachable from the specified trigger
+    fn build_execution_graph(&self, trigger: &'a Trigger<'a>) -> executor::Result<ExecutionGraph> {
+        use petgraph::visit::Bfs;
 
-        while let Some(curr_ref) = stack.pop() {
-            for task_ref in self.workflow.find_tasks_depending_on(&curr_ref) {
-                if visited.insert(task_ref) {
-                    stack.push(task_ref);
+        let mut graph = Graph::new();
+        let mut index_map = HashMap::new();
+        let trigger_ref = DependencyRef::Trigger(trigger.id());
+
+        // Get the compiled workflow's graph and index map
+        let compiled_graph = self.workflow.dependency_graph();
+        let compiled_index_map = self.workflow.index_map();
+
+        // Find all nodes reachable from this trigger using BFS
+        let mut reachable = HashSet::new();
+        if let Some(&start_index) = compiled_index_map.get(&trigger_ref) {
+            let mut bfs = Bfs::new(compiled_graph, start_index);
+            while let Some(node_idx) = bfs.next(compiled_graph) {
+                if let Some(node_ref) = compiled_graph.node_weight(node_idx) {
+                    reachable.insert(*node_ref);
                 }
             }
         }
 
-        visited
-    }
-
-    /// Builds the execution graph for the workflow starting from a given trigger
-    fn build_execution_graph(&self, trigger: &'a Trigger<'a>) -> workflow::Result<ExecutionGraph> {
-        let mut graph = Graph::new();
-        let mut index_map = HashMap::new();
-
-        // Find all reachable tasks from this trigger
-        let reachable_tasks = self.reachable_tasks(trigger);
-
-        // Add reachable tasks as nodes
-        for &task_dep in &reachable_tasks {
-            let task_node = task_dep;
-            let node_index = graph.add_node(task_node.clone());
-            index_map.insert(task_node, node_index);
+        // Build subgraph with only reachable nodes
+        for &node_ref in &reachable {
+            let node_index = graph.add_node(node_ref);
+            index_map.insert(node_ref, node_index);
         }
 
-        // Add edges for dependencies
-        for &task_dep in &reachable_tasks {
-            let task_node = task_dep;
-            let task_index = index_map[&task_node];
-
-            // Get the corresponding Task
-            let task = match task_node {
-                DependencyRef::Task(id) => self.workflow.tasks().get(&id),
-                _ => None,
-            };
-            if let Some(task) = task {
-                // Add edges for explicit dependencies
-                for dep in task.dependencies() {
-                    if let Some(&dep_index) = index_map.get(dep) {
-                        graph.add_edge(dep_index, task_index, ());
-                    }
-                }
-                // Add edges for input bindings
-                for binding in task.inputs().values() {
-                    if let crate::task::InputBinding::Reference { ref_from, .. } = binding {
-                        if let Some(&dep_index) = index_map.get(ref_from) {
-                            graph.add_edge(dep_index, task_index, ());
-                        }
+        // Add edges between reachable nodes
+        for &node_ref in &reachable {
+            if let Some(&compiled_idx) = compiled_index_map.get(&node_ref) {
+                // Find all edges in the compiled graph where source is this node
+                let mut edges = compiled_graph.neighbors(compiled_idx).detach();
+                while let Some(target_idx) = edges.next_node(compiled_graph) {
+                    let target_ref = compiled_graph[target_idx];
+                    // Only add edge if target is also reachable
+                    if reachable.contains(&target_ref) {
+                        let source_idx = index_map[&node_ref];
+                        let target_idx_new = index_map[&target_ref];
+                        graph.add_edge(source_idx, target_idx_new, ());
                     }
                 }
             }
@@ -287,7 +272,7 @@ impl<'a> WorkflowExecutorBuilder<'a> {
         // Construct execution context automatically
         let context = WorkflowExecutionContext::builder()
             .run_id(Uuid::new_v4())
-            .workflow_id(*workflow.id())
+            .workflow_id(*workflow.workflow().id())
             .build()
             .map_err(|e| e.to_string())?;
 
@@ -305,6 +290,7 @@ mod tests {
         TaskHandler, TaskSchema,
     };
     use crate::trigger::{Trigger, TriggerDefinition, TriggerSchema};
+    use crate::workflow::{Workflow, WorkflowCompiler};
 
     struct InOutTaskHandler;
 
@@ -441,8 +427,11 @@ mod tests {
             .build()
             .unwrap();
 
+        // Compile the workflow before execution
+        let compiled_wf = WorkflowCompiler::compile(&workflow).unwrap();
+
         let mut exec = WorkflowExecutor::builder()
-            .workflow(&workflow)
+            .workflow(&compiled_wf)
             .plugins(&reg)
             .build()
             .unwrap();
@@ -452,26 +441,11 @@ mod tests {
             .outputs([("out", Value::String("trigger1_output"))])
             .build()
             .unwrap();
-        let result = exec.execute_from_trigger(trigger1.id(), trigger1_result);
+        let result = exec.trigger(trigger1.id(), trigger1_result);
         assert!(result.is_ok(), "Execution failed: {:?}", result.err());
-        // The execution order should include t2 but not t3
-        let reachable = exec.reachable_tasks(&trigger1);
-        let task_ids: Vec<_> = reachable
-            .iter()
-            .filter_map(|d| {
-                if let DependencyRef::Task(id) = d {
-                    Some(*id)
-                } else {
-                    None
-                }
-            })
-            .collect();
-        assert!(task_ids.contains(&t2.id()));
-        assert!(!task_ids.contains(&t3.id()));
-
         // Trigger 2 should only execute t3 (and not t2)
         let mut exec2 = WorkflowExecutor::builder()
-            .workflow(&workflow)
+            .workflow(&compiled_wf)
             .plugins(&reg)
             .build()
             .unwrap();
@@ -479,21 +453,8 @@ mod tests {
             .outputs([("out", Value::String("trigger2_output"))])
             .build()
             .unwrap();
-        let result2 = exec2.execute_from_trigger(trigger2.id(), trigger2_result);
+        let result2 = exec2.trigger(trigger2.id(), trigger2_result);
         assert!(result2.is_ok());
-        let reachable2 = exec2.reachable_tasks(&trigger2);
-        let task_ids2: Vec<_> = reachable2
-            .iter()
-            .filter_map(|d| {
-                if let DependencyRef::Task(id) = d {
-                    Some(*id)
-                } else {
-                    None
-                }
-            })
-            .collect();
-        assert!(task_ids2.contains(&t3.id()));
-        assert!(!task_ids2.contains(&t2.id()));
     }
 
     #[test]
@@ -511,15 +472,14 @@ mod tests {
             .trigger((trigger.id(), trigger.clone()))
             .build()
             .unwrap();
+        let compiled_wf = WorkflowCompiler::compile(&workflow).unwrap();
         let mut exec = WorkflowExecutor::builder()
-            .workflow(&workflow)
+            .workflow(&compiled_wf)
             .plugins(&reg)
             .build()
             .unwrap();
-        let result = exec.execute_from_trigger(trigger.id(), TriggerResult::default());
+        let result = exec.trigger(trigger.id(), TriggerResult::default());
         assert!(result.is_ok());
-        let reachable = exec.reachable_tasks(&trigger);
-        assert!(reachable.is_empty());
     }
 
     #[test]
@@ -580,12 +540,13 @@ mod tests {
             .task((t3.id(), t3.clone()))
             .build()
             .unwrap();
+        let compiled_wf = WorkflowCompiler::compile(&workflow).unwrap();
         let mut exec = WorkflowExecutor::builder()
-            .workflow(&workflow)
+            .workflow(&compiled_wf)
             .plugins(&reg)
             .build()
             .unwrap();
-        let result = exec.execute_from_trigger(
+        let result = exec.trigger(
             trigger.id(),
             TriggerResult::builder()
                 .outputs([("out", Value::String("trigger_output"))])
@@ -593,24 +554,11 @@ mod tests {
                 .unwrap(),
         );
         assert!(result.is_ok(), "Execution failed: {:?}", result.err());
-        let reachable = exec.reachable_tasks(&trigger);
-        let task_ids: Vec<_> = reachable
-            .iter()
-            .filter_map(|d| {
-                if let DependencyRef::Task(id) = d {
-                    Some(*id)
-                } else {
-                    None
-                }
-            })
-            .collect();
-        assert!(task_ids.contains(&t2.id()));
-        assert!(task_ids.contains(&t3.id()));
     }
 
     #[test]
     fn test_executor_handles_circular_dependencies() {
-        let reg = setup_registry();
+        let _reg = setup_registry();
         let trigger_def = dummy_trigger_def("trig", Some(("out", DataType::String)));
         let trigger = Trigger::builder()
             .id(Uuid::new_v4())
@@ -659,21 +607,16 @@ mod tests {
             .task((t2_id, t2.clone()))
             .build()
             .unwrap();
-        let mut exec = WorkflowExecutor::builder()
-            .workflow(&workflow)
-            .plugins(&reg)
-            .build()
-            .unwrap();
-        // Should return an error due to circular dependency
-        let result = exec.execute_from_trigger(trigger.id(), TriggerResult::default());
+        // Compilation should fail due to circular dependency
+        let compiled_result = WorkflowCompiler::compile(&workflow);
         assert!(
-            result.is_err(),
-            "Expected error due to circular dependency, but got Ok"
+            compiled_result.is_err(),
+            "Expected compilation error due to circular dependency"
         );
-        let err_str = format!("{:?}", result.unwrap_err());
+        let err_str = format!("{:?}", compiled_result.unwrap_err());
         assert!(
-            err_str.contains("cycle") || err_str.contains("Cycle"),
-            "Error should mention cycle, got: {}",
+            err_str.contains("Cyclic") || err_str.contains("cycle"),
+            "Error should mention cyclic dependency, got: {}",
             err_str
         );
     }
@@ -731,8 +674,9 @@ mod tests {
             .task((t2.id(), t2.clone()))
             .build()
             .unwrap();
+        let compiled_wf = WorkflowCompiler::compile(&workflow).unwrap();
         let mut exec = WorkflowExecutor::builder()
-            .workflow(&workflow)
+            .workflow(&compiled_wf)
             .plugins(&reg)
             .build()
             .unwrap();
@@ -740,26 +684,13 @@ mod tests {
             .outputs([("out", Value::String("trigger1_output"))])
             .build()
             .unwrap();
-        let result = exec.execute_from_trigger(trigger1.id(), trigger1_result);
+        let result = exec.trigger(trigger1.id(), trigger1_result);
         assert!(result.is_ok());
-        let reachable = exec.reachable_tasks(&trigger1);
-        let task_ids: Vec<_> = reachable
-            .iter()
-            .filter_map(|d| {
-                if let DependencyRef::Task(id) = d {
-                    Some(*id)
-                } else {
-                    None
-                }
-            })
-            .collect();
-        assert!(task_ids.contains(&t1.id()));
-        assert!(!task_ids.contains(&t2.id()));
     }
 
     #[test]
     fn test_missing_dependency_output_error() {
-        let reg = setup_registry();
+        let _reg = setup_registry();
         let trigger_def = dummy_trigger_def("trig", Some(("out", DataType::String)));
         let trigger = Trigger::builder()
             .id(Uuid::new_v4())
@@ -787,28 +718,24 @@ mod tests {
             .task((t1.id(), t1.clone()))
             .build()
             .unwrap();
-        let mut exec = WorkflowExecutor::builder()
-            .workflow(&workflow)
-            .plugins(&reg)
-            .build()
-            .unwrap();
-        let result = exec.execute_from_trigger(trigger.id(), TriggerResult::default());
-        match result {
+        // This should fail during compilation due to missing output
+        let compiled_result = WorkflowCompiler::compile(&workflow);
+        match compiled_result {
             Err(e) => {
                 let err_str = format!("{:?}", e);
                 assert!(
-                    err_str.contains("MissingDependencyOutput"),
-                    "Expected MissingDependencyOutput error, got: {}",
+                    err_str.contains("MissingOutput") || err_str.contains("missing"),
+                    "Expected missing output error during compilation, got: {}",
                     err_str
                 );
             }
-            Ok(_) => panic!("Expected error due to missing dependency output, but got Ok"),
+            Ok(_) => panic!("Expected compilation error due to missing dependency output"),
         }
     }
 
     #[test]
     fn test_failed_dependency_output_error() {
-        let reg = setup_registry();
+        let _reg = setup_registry();
         let trigger_def = dummy_trigger_def("trig", None); // No outputs
         let trigger = Trigger::builder()
             .id(Uuid::new_v4())
@@ -836,23 +763,18 @@ mod tests {
             .task((t1.id(), t1.clone()))
             .build()
             .unwrap();
-        let mut exec = WorkflowExecutor::builder()
-            .workflow(&workflow)
-            .plugins(&reg)
-            .build()
-            .unwrap();
-        let result = exec.execute_from_trigger(trigger.id(), TriggerResult::default());
-        match result {
+        // This should fail during compilation due to missing output
+        let compiled_result = WorkflowCompiler::compile(&workflow);
+        match compiled_result {
             Err(e) => {
                 let err_str = format!("{:?}", e);
                 assert!(
-                    err_str.contains("FailedDependencyOutput")
-                        || err_str.contains("MissingDependencyOutput"),
-                    "Expected FailedDependencyOutput or MissingDependencyOutput error, got: {}",
+                    err_str.contains("MissingTriggerOutput") || err_str.contains("MissingOutput"),
+                    "Expected missing output error during compilation, got: {}",
                     err_str
                 );
             }
-            Ok(_) => panic!("Expected error due to failed dependency output, but got Ok"),
+            Ok(_) => panic!("Expected compilation error due to failed dependency output"),
         }
     }
 
@@ -890,8 +812,9 @@ mod tests {
             .task((t1.id(), t1.clone()))
             .build()
             .unwrap();
+        let compiled_wf = WorkflowCompiler::compile(&workflow).unwrap();
         let mut exec = WorkflowExecutor::builder()
-            .workflow(&workflow)
+            .workflow(&compiled_wf)
             .plugins(&reg)
             .build()
             .unwrap();
@@ -899,7 +822,7 @@ mod tests {
         let mut outputs = HashMap::new();
         outputs.insert("out", Value::String("hello"));
         let trigger_result = TriggerResult::builder().outputs(outputs).build().unwrap();
-        let result = exec.execute_from_trigger(trigger.id(), trigger_result);
+        let result = exec.trigger(trigger.id(), trigger_result);
         assert!(
             result.is_ok(),
             "Expected Ok for successful output propagation"

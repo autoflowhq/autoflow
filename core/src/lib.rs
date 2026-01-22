@@ -1,3 +1,5 @@
+pub mod compiler;
+pub mod executor;
 pub mod logger;
 pub mod plugin;
 pub mod task;
@@ -15,10 +17,11 @@ pub mod test {
 
     use crate::{
         Value,
+        executor::WorkflowExecutor,
         plugin::{Plugin, Registry},
         task::{DataType, InputSpec, OutputSpec, TaskContext, TaskHandler, TaskResult},
         trigger::{TriggerDefinition, TriggerResult, TriggerSchema},
-        workflow::{DependencyRef, execution::WorkflowExecutor},
+        workflow::DependencyRef,
     };
 
     struct ResizeImageHandler;
@@ -58,13 +61,11 @@ pub mod test {
 
     #[test]
     fn test_all() {
-        use uuid::Uuid;
-
         use crate::{
             Value,
             task::{InputBinding, Task, TaskDefinition, TaskSchema},
             trigger::Trigger,
-            workflow::Workflow,
+            workflow::{Workflow, WorkflowCompiler},
         };
 
         let file_added_trigger = TriggerDefinition::builder()
@@ -153,7 +154,6 @@ pub mod test {
 
         // Add a trigger (workflow owns it)
         let new_file_trigger = Trigger::builder()
-            .id(Uuid::new_v4())
             .name("new_file")
             .definition(
                 registry
@@ -231,21 +231,22 @@ pub mod test {
         let new_file_trigger_id = new_file_trigger.id();
 
         wf.add_trigger(new_file_trigger);
-        wf.add_task(resize).unwrap();
-        wf.add_task(compress).unwrap();
-        wf.add_task(upload).unwrap();
-        wf.add_task(thumbnail).unwrap();
+        wf.add_task(resize);
+        wf.add_task(compress);
+        wf.add_task(upload);
+        wf.add_task(thumbnail);
+
+        // Compile the workflow before execution
+        let compiled_wf = WorkflowCompiler::compile(&wf).unwrap();
 
         let mut executor = WorkflowExecutor::builder()
-            .workflow(&wf)
+            .workflow(&compiled_wf)
             .plugins(&registry)
             .build()
             .unwrap();
         let mut outputs = HashMap::new();
         outputs.insert("file_path", Value::String("/Downloads/image1.jpg"));
         let result = TriggerResult::builder().outputs(outputs).build().unwrap();
-        executor
-            .execute_from_trigger(new_file_trigger_id, result)
-            .unwrap();
+        executor.trigger(new_file_trigger_id, result).unwrap();
     }
 }

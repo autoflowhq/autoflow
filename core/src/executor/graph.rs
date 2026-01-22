@@ -7,7 +7,10 @@ use petgraph::{
     graph::{DiGraph, NodeIndex},
 };
 
-use crate::workflow::{DependencyRef, Result, execution::ExecutionError};
+use crate::{
+    executor::{ExecutionError, Result},
+    workflow::DependencyRef,
+};
 
 /// Represents the execution graph of dependencies in a workflow
 #[derive(new, Getters)]
